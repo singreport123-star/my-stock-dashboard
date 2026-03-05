@@ -3,93 +3,93 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 
-# --- 網頁基礎設定 ---
-st.set_page_config(page_title="自定義美股觀測站", layout="wide")
+# --- 網頁設定 ---
+st.set_page_config(page_title="我的美股戰情室", layout="wide")
 
 st.title("🚀 我的股市數據儀表板")
 
-# --- 側邊欄：動態輸入標的 ---
-st.sidebar.header("控制面板")
-# 預設標的字串
-default_tickers = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
-user_input = st.sidebar.text_area("請輸入美股代號 (用逗號分隔)", default_tickers)
-# 將字串轉為列表並去空格
-tickers = [t.strip().upper() for t in user_input.split(",")]
+# --- 側邊欄：自由輸入標的 ---
+st.sidebar.header("⚙️ 控制面板")
+# 你可以隨時在這裡修改預設要觀測的標的
+default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
+user_input = st.sidebar.text_area("請輸入美股代號 (用逗號分隔)", default_list)
+ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
-# --- 1. TQQQ 輪動策略區 ---
-def render_strategy():
+# --- 1. QQQ 200MA 策略警示 ---
+def render_strategy_light():
     try:
         qqq = yf.Ticker("QQQ")
         hist = qqq.history(period="1y")
         if not hist.empty:
-            current_price = hist['Close'].iloc[-1]
+            curr = hist['Close'].iloc[-1]
             ma200 = hist['Close'].rolling(window=200).mean().iloc[-1]
-            diff = ((current_price - ma200) / ma200) * 100
-            
             st.subheader("💡 交易策略警示 (TQQQ 輪動)")
             c1, c2, c3 = st.columns(3)
-            c1.metric("QQQ 現價", f"${current_price:.2f}")
-            c2.metric("QQQ 200MA", f"${ma200:.2f}", f"{diff:.2f}%")
-            if current_price > ma200:
-                c3.success("✅ 訊號：多頭")
+            c1.metric("QQQ 現價", f"${curr:.2f}")
+            c2.metric("QQQ 200MA", f"${ma200:.2f}")
+            if curr > ma200:
+                c3.success("✅ 訊號：多頭 (站上 200MA)")
             else:
-                c3.error("🚨 訊號：空頭")
+                c3.error("🚨 訊號：空頭 (跌破 200MA)")
     except:
-        st.error("策略數據更新中...")
+        st.warning("策略數據暫時無法取得")
 
-render_strategy()
+render_strategy_light()
 st.divider()
 
-# --- 2. 核心數據抓取 ---
+# --- 2. 抓取基本面數據 ---
 @st.cache_data(ttl=1800)
-def get_stock_data(symbol_list):
-    all_data = []
-    for s in symbol_list:
+def fetch_fundamental_data(tickers):
+    data = []
+    for s in tickers:
         try:
             tk = yf.Ticker(s)
             info = tk.info
+            # 優先從 history 抓最新價格，比較穩
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else info.get('currentPrice', 0)
             
-            is_etf = info.get('quoteType') in ['ETF', 'FUND']
-            peg = info.get("pegRatio") if info.get("pegRatio") else info.get("trailingPegRatio", "—")
+            # PEG 強化抓取
+            peg = info.get('pegRatio') or info.get('trailingPegRatio', '—')
             
-            all_data.append({
+            data.append({
                 "標的": s,
-                "名稱": info.get("shortName", "N/A"),
-                "現價": price,
-                "PE": info.get("trailingPE", "—"),
-                "Fwd PE": info.get("forwardPE", "—"),
-                "PEG": peg,
-                "市值(B)": round(info.get('marketCap', 0)/1e9, 1) if info.get('marketCap') else "—"
+                "名稱": info.get('shortName', 'N/A'),
+                "現價": f"${price:.2f}" if price else "N/A",
+                "PE (本益比)": round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else "—",
+                "Forward PE": round(info.get('forwardPE', 0), 2) if info.get('forwardPE') else "—",
+                "PEG": round(peg, 2) if isinstance(peg, (int, float)) else peg,
+                "市值 (B)": round(info.get('marketCap', 0)/1e9, 2) if info.get('marketCap') else "—"
             })
         except:
             continue
-    return pd.DataFrame(all_data)
+    return pd.DataFrame(data)
 
-# --- 3. 顯示數據表 ---
-st.subheader("📊 基本面概覽")
-df = get_stock_data(tickers)
-if not df.empty:
-    st.dataframe(df, use_container_width=True, hide_index=True)
-else:
-    st.warning("請在左側輸入正確的代號")
+st.subheader("📊 個股基本面概覽")
+df = fetch_fundamental_data(ticker_list)
+st.dataframe(df, use_container_width=True, hide_index=True)
 
-# --- 4. 個股新聞模組 (新增功能) ---
+# --- 3. 個股新聞 (修正 KeyError) ---
 st.divider()
 st.subheader("📰 最新個股相關新聞")
-selected_stock = st.selectbox("選擇要查看新聞的標的", tickers)
+news_target = st.selectbox("選擇要看新聞的標的", ticker_list)
 
-if selected_stock:
-    news_tk = yf.Ticker(selected_stock)
-    news_list = news_tk.news[:5] # 抓取前 5 則新聞
-    if news_list:
-        for item in news_list:
-            with st.expander(item['title']):
-                st.write(f"來源: {item['publisher']}")
-                st.write(f"時間: {datetime.fromtimestamp(item['providerPublishTime']).strftime('%Y-%m-%d %H:%M')}")
-                st.markdown(f"[閱讀全文]({item['link']})")
-    else:
-        st.write("目前暫無即時新聞。")
+if news_target:
+    try:
+        target_tk = yf.Ticker(news_target)
+        news_items = target_tk.news[:5]
+        if news_items:
+            for item in news_items:
+                # 使用 .get() 避免 KeyError，並提供預設值
+                title = item.get('title', '無標題')
+                link = item.get('link', '#')
+                publisher = item.get('publisher', '未知來源')
+                with st.expander(title):
+                    st.write(f"來源: {publisher}")
+                    st.markdown(f"[點我查看新聞原文]({link})")
+        else:
+            st.write("目前沒有相關新聞。")
+    except:
+        st.write("新聞抓取失敗，請稍後再試。")
 
-st.caption(f"最後更新: {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"最後更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
