@@ -1,17 +1,31 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="專業股市戰情室 v5.1", layout="wide")
-st.title("🚀 專業美股基本面：長期歷史(3Y)與同業對照")
+st.set_page_config(page_title="專業股市戰情室 v7.0", layout="wide")
+st.title("🏛️ 專業美股：多指標歷史趨勢繪圖 (3Y/5Y)")
 
-# --- 側邊欄 ---
+# --- 側邊欄：控制面板 ---
 st.sidebar.header("⚙️ 控制面板")
-default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
-user_input = st.sidebar.text_area("觀測代號 (以逗號分隔)", default_list)
+default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, HIMS"
+user_input = st.sidebar.text_area("觀測代號", default_list)
 ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
+
+st.sidebar.divider()
+st.sidebar.subheader("📊 繪圖選項")
+# 讓使用者勾選想要放進圖表的指標
+show_price = st.sidebar.checkbox("股價 (Price)", value=True)
+show_pe = st.sidebar.checkbox("本益比 (PE)", value=True)
+show_fwd_pe = st.sidebar.checkbox("預估本益比 (Forward PE)", value=False)
+show_roe = st.sidebar.checkbox("股東權益報酬率 (ROE)", value=True)
+show_gm = st.sidebar.checkbox("毛利率 (Gross Margin)", value=True)
+
+period = st.sidebar.selectbox("時間跨度", ["3y", "5y", "max"], index=0)
+ma_window = st.sidebar.slider("移動平均線天數 (MA)", 5, 60, 20)
 
 # --- 1. TQQQ 輪動策略 ---
 try:
@@ -29,81 +43,61 @@ except: pass
 
 st.divider()
 
-# --- 2. 核心分析邏輯：3年歷史與同業對照 ---
-@st.cache_data(ttl=1800)
-def fetch_longterm_compare_data(tickers):
-    raw_results = []
-    industry_pe_map = {}
-    
-    for s in tickers:
+# --- 2. 動態繪圖邏輯 ---
+st.subheader("📈 多指標歷史趨勢圖對照")
+target = st.selectbox("選擇要分析的標的", ticker_list)
+
+if target:
+    with st.spinner(f'正在分析 {target} 的歷史長線數據...'):
         try:
-            tk = yf.Ticker(s)
+            tk = yf.Ticker(target)
+            # 抓取歷史價格數據
+            hist = tk.history(period=period)
+            # 抓取年度與季度財報
+            fin = tk.quarterly_financials.T
+            
+            # --- 數據準備與對齊 ---
+            df = hist[['Close']].copy()
+            df.columns = ['Price']
+            
+            # 處理 PE 與指標 (透過 TTM 滾動計算)
             info = tk.info
-            # 將歷史區間拉長至 3 年
-            hist_3y = tk.history(period="3y")
-            
-            # 股價與基本面
-            price = hist_3y['Close'].iloc[-1] if not hist_3y.empty else 0
-            curr_pe = info.get('trailingPE')
-            eps = info.get('trailingEps') or 1
-            
-            # 計算 3 年內的 PE 最高與最低點
-            if not hist_3y.empty:
-                pe_3y_high = round(hist_3y['Close'].max() / eps, 1)
-                pe_3y_low = round(hist_3y['Close'].min() / eps, 1)
-            else:
-                pe_3y_high, pe_3y_low = "—", "—"
-            
-            industry = info.get('industry', 'ETF/Other')
-            
-            raw_results.append({
-                "標的": s,
-                "現價": price,
-                "PE (現)": curr_pe,
-                "3年PE高點": pe_3y_high,
-                "3年PE低點": pe_3y_low,
-                "行業": industry,
-                "PEG": info.get('pegRatio') or info.get('trailingPegRatio'),
-                "ROE (%)": info.get('returnOnEquity'),
-                "毛利 (%)": info.get('grossMargins'),
-                "市值 (B)": info.get('marketCap', 0) / 1e9
-            })
-            
-            # 累積同業數據用於水平比較
-            if curr_pe and industry != 'ETF/Other':
-                if industry not in industry_pe_map: industry_pe_map[industry] = []
-                industry_pe_map[industry].append(curr_pe)
-        except: continue
-    
-    # 計算同業平均 PE
-    industry_avg = {k: sum(v)/len(v) for k, v in industry_pe_map.items()}
-    
-    final_data = []
-    for item in raw_results:
-        avg_pe = industry_avg.get(item["行業"], 0)
-        
-        final_data.append({
-            "標的": item["標的"],
-            "現價": f"${item['現價']:.2f}",
-            "PE (現)": f"{item['PE (現)']:.1f}" if item['PE (現)'] else "—",
-            "3年PE區間 (高/低)": f"{item['3年PE高點']} / {item['3年PE低點']}",
-            "同業平均PE": f"{avg_pe:.1f}" if avg_pe > 0 else "—",
-            "PEG": round(item["PEG"], 2) if isinstance(item["PEG"], (int, float)) else "—",
-            "ROE": f"{round(item['ROE (%)']*100, 1)}%" if item['ROE (%)'] else "—",
-            "毛利": f"{round(item['毛利 (%)']*100, 1)}%" if item['毛利 (%)'] else "—",
-            "市值(B)": f"{item['市值 (B)']:.1f}B",
-            "行業": item["行業"]
-        })
-    return pd.DataFrame(final_data)
+            eps_ttm = fin['Basic EPS'].rolling(4).sum() if 'Basic EPS' in fin.columns else None
+            roe_ttm = (fin['Net Income'] / tk.quarterly_balance_sheet.T['Total Stockholders Equity']).rolling(4).mean() if 'Net Income' in fin.columns else None
+            gm_ttm = (fin['Gross Profit'] / fin['Total Revenue']).rolling(4).mean() if 'Gross Profit' in fin.columns else None
 
-st.subheader("📊 專業數據表：3年歷史位階與同業水平對照")
-with st.spinner('正在分析長期估值數據...'):
-    df = fetch_longterm_compare_data(ticker_list)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+            # 將季報數據擴展至每日數據並對齊
+            if eps_ttm is not None:
+                df['PE'] = df['Price'] / eps_ttm.reindex(df.index, method='ffill')
+            if roe_ttm is not None:
+                df['ROE'] = roe_ttm.reindex(df.index, method='ffill') * 100
+            if gm_ttm is not None:
+                df['GM'] = gm_ttm.reindex(df.index, method='ffill') * 100
+            
+            # --- 繪圖 ---
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            # 股價 (左軸)
+            if show_price:
+                fig.add_trace(go.Scatter(x=df.index, y=df['Price'], name="Price (左軸)", line=dict(color='black', width=2)), secondary_y=False)
+            
+            # PE (左軸 - 數值較大)
+            if show_pe and 'PE' in df.columns:
+                fig.add_trace(go.Scatter(x=df.index, y=df['PE'].rolling(ma_window).mean(), name=f"PE {ma_window}MA (左軸)", line=dict(dash='dash')), secondary_y=False)
 
-st.markdown("""
-> **📈 垂直分析（歷史）**：觀察『PE (現)』在 3 年高低區間的位置。若接近低點，代表估值處於近年低位。
-> **📉 水平分析（同業）**：對比『同業平均PE』。大幅高於同業可能代表溢價過高，大幅低於則可能具備補漲潛力。
-""")
+            # ROE / GM (右軸 - 百分比)
+            if show_roe and 'ROE' in df.columns:
+                fig.add_trace(go.Scatter(x=df.index, y=df['ROE'].rolling(ma_window).mean(), name=f"ROE {ma_window}MA (右軸 %)", line=dict(color='blue', width=1.5)), secondary_y=True)
+            if show_gm and 'GM' in df.columns:
+                fig.add_trace(go.Scatter(x=df.index, y=df['GM'].rolling(ma_window).mean(), name=f"毛利 {ma_window}MA (右軸 %)", line=dict(color='green', width=1.5)), secondary_y=True)
 
-st.caption(f"最後更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            fig.update_layout(title=f"{target} 長線財務趨勢對照", hovermode="x unified", height=600)
+            fig.update_yaxes(title_text="價格 / PE", secondary_y=False)
+            fig.update_yaxes(title_text="百分比 (%)", secondary_y=True)
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+        except Exception as e:
+            st.warning(f"圖表繪製失敗：部分歷史財務數據不足。錯誤代碼: {e}")
+
+st.caption(f"數據更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
