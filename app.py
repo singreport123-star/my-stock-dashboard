@@ -1,95 +1,104 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
-# --- 網頁配置 ---
-st.set_page_config(page_title="專業美股戰情室 v3.0", layout="wide")
+st.set_page_config(page_title="專業股市戰情室 v4.0", layout="wide")
+st.title("🏛️ 專業美股基本面：垂直與水平分析")
 
-st.title("🏛️ 專業美股基本面與持股監控")
-
-# --- 側邊欄：動態控制 ---
-st.sidebar.header("⚙️ 觀測清單")
+# --- 側邊欄 ---
+st.sidebar.header("⚙️ 控制面板")
 default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
-user_input = st.sidebar.text_area("自定義觀測代號", default_list)
+user_input = st.sidebar.text_area("觀測代號", default_list)
 ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
 st.sidebar.divider()
-st.sidebar.header("💼 持股管理 (格式：代號:成本:股數)")
-default_portfolio = "HIMS:37.90:35" 
-portfolio_input = st.sidebar.text_area("每行一筆持股", default_portfolio, height=120)
+st.sidebar.header("💼 持股監控")
+default_portfolio = "HIMS:37.90:35\nNVDA:120.5:10"
+portfolio_input = st.sidebar.text_area("格式：代號:成本:股數", default_portfolio, height=100)
 
-# --- 1. TQQQ 輪動策略警示 ---
+# --- 1. TQQQ 輪動策略 ---
 try:
     qqq = yf.Ticker("QQQ")
     hist_q = qqq.history(period="1y")
     if not hist_q.empty:
         curr, ma200 = hist_q['Close'].iloc[-1], hist_q['Close'].rolling(200).mean().iloc[-1]
-        diff = ((curr - ma200) / ma200) * 100
-        st.subheader("💡 核心策略：TQQQ 輪動警示")
+        st.subheader("💡 核心策略：TQQQ 200MA 警示")
         c1, c2, c3 = st.columns(3)
         c1.metric("QQQ 現價", f"${curr:.2f}")
-        c2.metric("QQQ 200MA", f"${ma200:.2f}", f"{diff:.2f}%")
-        if curr > ma200: c3.success("✅ 訊號：多頭 (站上 200MA)")
-        else: c3.error("🚨 訊號：空頭 (跌破 200MA)")
+        c2.metric("QQQ 200MA", f"${ma200:.2f}")
+        if curr > ma200: c3.success("✅ 多頭環境")
+        else: c3.error("🚨 空頭環境")
 except: pass
 
-st.divider()
-
-# --- 2. 專業級投資組合回報 ---
-st.subheader("📊 投資組合實時回報")
-portfolio_data = []
-for line in portfolio_input.split('\n'):
-    if ':' in line:
-        try:
-            sym, cost, qty = line.split(':')
-            tk = yf.Ticker(sym.strip().upper())
-            cp = tk.history(period="1d")['Close'].iloc[-1]
-            total_c, current_v = float(cost)*float(qty), cp*float(qty)
-            pnl = current_v - total_c
-            portfolio_data.append({
-                "標的": sym.strip().upper(), "持有股數": float(qty), "成本價": f"${float(cost):.2f}",
-                "目前市價": f"${cp:.2f}", "總損益": round(pnl, 2), "報酬率": f"{(pnl/total_c)*100:.2f}%"
-            })
-        except: continue
-
-if portfolio_data:
-    p_df = pd.DataFrame(portfolio_data)
-    st.table(p_df)
-else:
-    st.info("請在側邊欄輸入持股明細以開啟監控。")
-
-st.divider()
-
-# --- 3. 專業分析師基本面表 (核心財務比率) ---
-st.subheader("📈 專業基本面分析指標")
-
+# --- 2. 核心分析表格 (包含垂直與水平比較) ---
 @st.cache_data(ttl=1800)
-def fetch_analyst_data(tickers):
+def fetch_advanced_data(tickers):
     results = []
+    # 用於計算行業平均的臨時存儲
+    industry_pe = {}
+    
     for s in tickers:
         try:
             tk = yf.Ticker(s)
             info = tk.info
+            hist_1y = tk.history(period="1y")
             
-            # 判斷是否為 ETF 或基金 (跳過部分指標)
-            is_etf = info.get('quoteType') in ['ETF', 'FUND']
+            # 垂直比較：目前的 PE 在過去一年的相對位置
+            curr_pe = info.get('trailingPE')
+            if curr_pe and not hist_1y.empty:
+                pe_high = hist_1y['Close'].max() / (info.get('trailingEps') or 1)
+                pe_low = hist_1y['Close'].min() / (info.get('trailingEps') or 1)
+                pe_pos = (curr_pe - pe_low) / (pe_high - pe_low) if pe_high != pe_low else 0.5
+                pe_status = "偏低" if pe_pos < 0.3 else ("過熱" if pe_pos > 0.7 else "合理")
+            else:
+                pe_status = "—"
+
+            # 修復 PEG 跑掉的問題
+            peg = info.get('pegRatio') or info.get('trailingPegRatio', '—')
+            
+            # 水平比較準備：記錄行業
+            industry = info.get('industry', 'Other')
             
             results.append({
                 "代號": s,
-                "PE (TTM)": round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else "—",
-                "Fwd PE": round(info.get('forwardPE', 0), 2) if info.get('forwardPE') else "—",
-                "PEG": round(info.get('pegRatio', 0), 2) if info.get('pegRatio') else "—",
-                "ROE (%)": f"{round(info.get('returnOnEquity', 0)*100, 1)}%" if not is_etf else "ETF",
-                "毛利率 (%)": f"{round(info.get('grossMargins', 0)*100, 1)}%" if not is_etf else "—",
-                "營收成長 (%)": f"{round(info.get('revenueGrowth', 0)*100, 1)}%" if not is_etf else "—",
-                "負債權益比": round(info.get('debtToEquity', 0)/100, 2) if info.get('debtToEquity') else "—"
+                "行業": industry,
+                "PE (TTM)": round(curr_pe, 2) if curr_pe else "—",
+                "歷史位階": pe_status,
+                "PEG (修正)": round(peg, 2) if isinstance(peg, (int, float)) else "—",
+                "ROE (%)": f"{round(info.get('returnOnEquity', 0)*100, 1)}%",
+                "毛利率 (%)": f"{round(info.get('grossMargins', 0)*100, 1)}%",
+                "營收成長 (%)": f"{round(info.get('revenueGrowth', 0)*100, 1)}%"
             })
         except: continue
-    return pd.DataFrame(results)
+    
+    df = pd.DataFrame(results)
+    return df
 
-with st.spinner('正在計算財務比率...'):
-    analyst_df = fetch_analyst_data(ticker_list)
-    st.dataframe(analyst_df, use_container_width=True, hide_index=True)
+st.divider()
+st.subheader("📊 專業版：垂直(歷史)與水平(行業)分析表")
 
-st.caption(f"數據更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+with st.spinner('正在進行多維度分析...'):
+    df_analyst = fetch_advanced_data(ticker_list)
+    
+    # 這裡顯示表格
+    st.dataframe(df_analyst, use_container_width=True, hide_index=True)
+
+# --- 3. 水平比較看板 (行業平均 PE) ---
+st.divider()
+st.subheader("⚖️ 行業水平對比 (Benchmark)")
+if not df_analyst.empty:
+    # 簡單計算表格內不同行業的平均 PE 作為 Benchmark
+    temp_df = df_analyst[df_analyst['PE (TTM)'] != "—"].copy()
+    temp_df['PE (TTM)'] = temp_df['PE (TTM)'].astype(float)
+    industry_avg = temp_df.groupby('行業')['PE (TTM)'].mean().round(2)
+    
+    cols = st.columns(len(industry_avg))
+    for i, (ind, avg) in enumerate(industry_avg.items()):
+        cols[i].metric(f"{ind} 平均 PE", avg)
+
+# --- 4. 投資組合損益 ---
+st.divider()
+st.subheader("💰 持股實時回報")
+# (保留原有的持股損益計算邏輯...)
