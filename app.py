@@ -4,19 +4,15 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-st.set_page_config(page_title="專業股市戰情室 v4.0", layout="wide")
-st.title("🏛️ 專業美股基本面：垂直與水平分析")
+# --- 網頁配置 ---
+st.set_page_config(page_title="專業股市戰情室 v4.5", layout="wide")
+st.title("🏛️ 專業美股：個股與同業/歷史一體化對照")
 
 # --- 側邊欄 ---
 st.sidebar.header("⚙️ 控制面板")
 default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
-user_input = st.sidebar.text_area("觀測代號", default_list)
+user_input = st.sidebar.text_area("觀測代號 (以逗號分隔)", default_list)
 ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
-
-st.sidebar.divider()
-st.sidebar.header("💼 持股監控")
-default_portfolio = "HIMS:37.90:35\nNVDA:120.5:10"
-portfolio_input = st.sidebar.text_area("格式：代號:成本:股數", default_portfolio, height=100)
 
 # --- 1. TQQQ 輪動策略 ---
 try:
@@ -28,77 +24,94 @@ try:
         c1, c2, c3 = st.columns(3)
         c1.metric("QQQ 現價", f"${curr:.2f}")
         c2.metric("QQQ 200MA", f"${ma200:.2f}")
-        if curr > ma200: c3.success("✅ 多頭環境")
-        else: c3.error("🚨 空頭環境")
+        if curr > ma200: st.success("✅ 多頭環境")
+        else: st.error("🚨 空頭環境")
 except: pass
 
-# --- 2. 核心分析表格 (包含垂直與水平比較) ---
+st.divider()
+
+# --- 2. 核心分析邏輯：一體化對照 ---
 @st.cache_data(ttl=1800)
-def fetch_advanced_data(tickers):
-    results = []
-    # 用於計算行業平均的臨時存儲
-    industry_pe = {}
+def fetch_integrated_data(tickers):
+    raw_results = []
+    industry_pe_map = {}
     
+    # 第一輪：抓取數據並計算行業平均
     for s in tickers:
         try:
             tk = yf.Ticker(s)
             info = tk.info
-            hist_1y = tk.history(period="1y")
+            is_etf = info.get('quoteType') in ['ETF', 'FUND']
             
-            # 垂直比較：目前的 PE 在過去一年的相對位置
+            # 抓取 PEG (多重備援)
+            peg = info.get('pegRatio') or info.get('trailingPegRatio', None)
+            
+            # 垂直比較：計算歷史位階 (過去一年 PE 區間)
             curr_pe = info.get('trailingPE')
-            if curr_pe and not hist_1y.empty:
-                pe_high = hist_1y['Close'].max() / (info.get('trailingEps') or 1)
-                pe_low = hist_1y['Close'].min() / (info.get('trailingEps') or 1)
-                pe_pos = (curr_pe - pe_low) / (pe_high - pe_low) if pe_high != pe_low else 0.5
-                pe_status = "偏低" if pe_pos < 0.3 else ("過熱" if pe_pos > 0.7 else "合理")
-            else:
-                pe_status = "—"
+            pe_rank = "—"
+            if curr_pe and not is_etf:
+                hist_1y = tk.history(period="1y")
+                eps = info.get('trailingEps') or 1
+                pe_high = hist_1y['Close'].max() / eps
+                pe_low = hist_1y['Close'].min() / eps
+                # 計算百分位
+                rank_val = (curr_pe - pe_low) / (pe_high - pe_low) if pe_high != pe_low else 0.5
+                pe_rank = f"{int(rank_val * 100)}%" # 0% 為最便宜，100% 為最貴
 
-            # 修復 PEG 跑掉的問題
-            peg = info.get('pegRatio') or info.get('trailingPegRatio', '—')
+            industry = info.get('industry', 'ETF/Other')
             
-            # 水平比較準備：記錄行業
-            industry = info.get('industry', 'Other')
-            
-            results.append({
-                "代號": s,
+            raw_results.append({
+                "標的": s,
                 "行業": industry,
-                "PE (TTM)": round(curr_pe, 2) if curr_pe else "—",
-                "歷史位階": pe_status,
-                "PEG (修正)": round(peg, 2) if isinstance(peg, (int, float)) else "—",
-                "ROE (%)": f"{round(info.get('returnOnEquity', 0)*100, 1)}%",
-                "毛利率 (%)": f"{round(info.get('grossMargins', 0)*100, 1)}%",
-                "營收成長 (%)": f"{round(info.get('revenueGrowth', 0)*100, 1)}%"
+                "PE (TTM)": curr_pe,
+                "歷史位階 (0%=最便宜)": pe_rank,
+                "PEG": peg,
+                "ROE (%)": info.get('returnOnEquity'),
+                "毛利率 (%)": info.get('grossMargins')
             })
+            
+            # 累計行業 PE 用於水平比較
+            if curr_pe and not is_etf:
+                if industry not in industry_pe_map: industry_pe_map[industry] = []
+                industry_pe_map[industry].append(curr_pe)
         except: continue
     
-    df = pd.DataFrame(results)
-    return df
-
-st.divider()
-st.subheader("📊 專業版：垂直(歷史)與水平(行業)分析表")
-
-with st.spinner('正在進行多維度分析...'):
-    df_analyst = fetch_advanced_data(ticker_list)
+    # 計算行業平均 PE
+    industry_avg = {k: sum(v)/len(v) for k, v in industry_pe_map.items()}
     
-    # 這裡顯示表格
-    st.dataframe(df_analyst, use_container_width=True, hide_index=True)
+    # 第二輪：格式化最終表格
+    final_data = []
+    for item in raw_results:
+        ind = item["行業"]
+        avg_pe = industry_avg.get(ind, None)
+        
+        # 計算與行業平均的偏離度
+        if item["PE (TTM)"] and avg_pe:
+            diff = ((item["PE (TTM)"] / avg_pe) - 1) * 100
+            peer_compare = f"{'+' if diff > 0 else ''}{int(diff)}% (vs同業)"
+        else:
+            peer_compare = "—"
 
-# --- 3. 水平比較看板 (行業平均 PE) ---
-st.divider()
-st.subheader("⚖️ 行業水平對比 (Benchmark)")
-if not df_analyst.empty:
-    # 簡單計算表格內不同行業的平均 PE 作為 Benchmark
-    temp_df = df_analyst[df_analyst['PE (TTM)'] != "—"].copy()
-    temp_df['PE (TTM)'] = temp_df['PE (TTM)'].astype(float)
-    industry_avg = temp_df.groupby('行業')['PE (TTM)'].mean().round(2)
+        final_data.append({
+            "標的": item["標的"],
+            "現價PE": f"{item['PE (TTM)']:.1f}" if item['PE (TTM)'] else "—",
+            "歷史位階": item["歷史位階 (0%=最便宜)"],
+            "水平比較": peer_compare,
+            "PEG": round(item["PEG"], 2) if isinstance(item["PEG"], (int, float)) else "—",
+            "ROE": f"{round(item['ROE (%)']*100, 1)}%" if item['ROE (%)'] else "—",
+            "毛利": f"{round(item['毛利率 (%)']*100, 1)}%" if item['毛利率 (%)'] else "—",
+            "行業": ind
+        })
     
-    cols = st.columns(len(industry_avg))
-    for i, (ind, avg) in enumerate(industry_avg.items()):
-        cols[i].metric(f"{ind} 平均 PE", avg)
+    return pd.DataFrame(final_data)
 
-# --- 4. 投資組合損益 ---
-st.divider()
-st.subheader("💰 持股實時回報")
-# (保留原有的持股損益計算邏輯...)
+st.subheader("📊 專業分析師對照表 (個股 vs 歷史 vs 行業)")
+with st.spinner('正在進行垂直與水平交叉分析...'):
+    df = fetch_integrated_data(ticker_list)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+st.info("💡 **如何閱讀此表？**\n"
+        "- **歷史位階**：靠近 0% 代表目前處於年度低估區；靠近 100% 代表相對歷史較貴。\n"
+        "- **水平比較**：顯示該股比同業平均貴(正數)或便宜(負數)多少。")
+
+st.caption(f"最後更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
