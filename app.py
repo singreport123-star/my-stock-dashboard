@@ -4,22 +4,22 @@ import pandas as pd
 from datetime import datetime
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="專業股市戰情室", layout="wide")
+st.set_page_config(page_title="我的美股戰情室", layout="wide")
 
 st.title("🚀 我的股市數據儀表板")
 
-# --- 側邊欄控制 ---
-st.sidebar.header("⚙️ 控制面板")
-# 你隨時可以在這裡修改預設清單，或在網頁上直接增減
+# --- 側邊欄：控制面板 ---
+st.sidebar.header("⚙️ 觀測清單設定")
 default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
 user_input = st.sidebar.text_area("自定義觀測代號 (以逗號分隔)", default_list)
 ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
-# 個人持股設定
 st.sidebar.divider()
-st.sidebar.subheader("💰 個人持股設定")
-hims_cost = st.sidebar.number_input("HIMS 買入單價 (USD)", value=37.90)
-hims_qty = st.sidebar.number_input("HIMS 持有股數", value=35)
+st.sidebar.header("💰 個人持股設定 (不需改程式)")
+# 讓使用者從清單中選擇目前持有的股票
+my_stock = st.sidebar.selectbox("選擇你的持股標的", ticker_list, index=ticker_list.index("HIMS") if "HIMS" in ticker_list else 0)
+my_cost = st.sidebar.number_input(f"{my_stock} 買入單價 (USD)", value=37.90, step=0.1)
+my_qty = st.sidebar.number_input(f"{my_stock} 持有股數", value=35, step=1)
 
 # --- 1. TQQQ 輪動策略警示 ---
 try:
@@ -41,27 +41,29 @@ except:
 
 st.divider()
 
-# --- 2. HIMS 持股損益區 (針對你的持倉) ---
-if "HIMS" in ticker_list:
-    st.subheader("📊 HIMS 投資回報監控")
-    try:
-        h_tk = yf.Ticker("HIMS")
-        h_hist = h_tk.history(period="1d")
-        if not h_hist.empty:
-            h_price = h_hist['Close'].iloc[-1]
-            total_cost = hims_cost * hims_qty
-            current_value = h_price * hims_qty
-            total_profit = current_value - total_cost
-            profit_percent = (total_profit / total_cost) * 100
-            
-            pc1, pc2, pc3 = st.columns(3)
-            pc1.metric("HIMS 目前市價", f"${h_price:.2f}")
-            # 根據損益正負顯示顏色
-            pc2.metric("預估總損益 (USD)", f"${total_profit:.2f}", f"{profit_percent:.2f}%")
-            pc3.info(f"持有股數: {hims_qty} | 總成本: ${total_cost:.2f}")
-            st.divider()
-    except:
-        st.write("暫時無法取得 HIMS 即時數據。")
+# --- 2. 動態持股損益區 ---
+st.subheader(f"📊 {my_stock} 投資回報監控")
+try:
+    target_tk = yf.Ticker(my_stock)
+    t_hist = target_tk.history(period="1d")
+    if not t_hist.empty:
+        current_price = t_hist['Close'].iloc[-1]
+        total_cost = my_cost * my_qty
+        current_value = current_price * my_qty
+        total_profit = current_value - total_cost
+        profit_percent = (total_profit / total_cost) * 100 if total_cost > 0 else 0
+        
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric(f"{my_stock} 目前市價", f"${current_price:.2f}")
+        # 損益顏色會隨正負自動變化
+        pc2.metric("預估總損益 (USD)", f"${total_profit:.2f}", f"{profit_percent:.2f}%")
+        pc3.info(f"持有股數: {my_qty} | 總成本: ${total_cost:.2f}")
+    else:
+        st.error("無法取得該標的報價，請檢查代號是否正確。")
+except Exception as e:
+    st.write("數據同步中...")
+
+st.divider()
 
 # --- 3. 基本面數據列表 ---
 @st.cache_data(ttl=1800)
@@ -73,8 +75,6 @@ def fetch_basic_data(tickers):
             info = tk.info
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0
-            
-            # PEG 抓取邏輯
             peg = info.get('pegRatio') or info.get('trailingPegRatio', '—')
             
             data.append({
@@ -90,10 +90,9 @@ def fetch_basic_data(tickers):
             continue
     return pd.DataFrame(data)
 
-st.subheader("📊 個股基本面概覽")
-with st.spinner('正在同步市場最新數據...'):
-    df = fetch_basic_data(ticker_list)
-    if not df.empty:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+st.subheader("📊 全球標的基本面概覽")
+df = fetch_basic_data(ticker_list)
+if not df.empty:
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 st.caption(f"最後更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
