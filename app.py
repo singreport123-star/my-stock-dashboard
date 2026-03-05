@@ -3,42 +3,39 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 
-# --- 網頁設定 ---
-st.set_page_config(page_title="我的美股戰情室", layout="wide")
+st.set_page_config(page_title="專業美股儀表板", layout="wide")
 
 st.title("🚀 我的股市數據儀表板")
 
-# --- 側邊欄：自由輸入標的 ---
+# --- 側邊欄：自由輸入 ---
 st.sidebar.header("⚙️ 控制面板")
 default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
 user_input = st.sidebar.text_area("請輸入美股代號 (用逗號分隔)", default_list)
 ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
-# --- 1. QQQ 200MA 策略警示 ---
-def render_strategy_light():
-    try:
-        qqq = yf.Ticker("QQQ")
-        hist = qqq.history(period="1y")
-        if not hist.empty:
-            curr = hist['Close'].iloc[-1]
-            ma200 = hist['Close'].rolling(window=200).mean().iloc[-1]
-            st.subheader("💡 交易策略警示 (TQQQ 輪動)")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("QQQ 現價", f"${curr:.2f}")
-            c2.metric("QQQ 200MA", f"${ma200:.2f}")
-            if curr > ma200:
-                c3.success("✅ 訊號：多頭 (站上 200MA)")
-            else:
-                c3.error("🚨 訊號：空頭 (跌破 200MA)")
-    except:
-        st.warning("策略數據更新中...")
+# --- 1. TQQQ 輪動策略 (保持原狀，這是你的核心) ---
+try:
+    qqq = yf.Ticker("QQQ")
+    hist = qqq.history(period="1y")
+    if not hist.empty:
+        curr = hist['Close'].iloc[-1]
+        ma200 = hist['Close'].rolling(window=200).mean().iloc[-1]
+        st.subheader("💡 交易策略警示 (TQQQ 輪動)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("QQQ 現價", f"${curr:.2f}")
+        c2.metric("QQQ 200MA", f"${ma200:.2f}")
+        if curr > ma200:
+            c3.success("✅ 訊號：多頭")
+        else:
+            c3.error("🚨 訊號：空頭")
+except:
+    st.warning("策略數據更新中...")
 
-render_strategy_light()
 st.divider()
 
-# --- 2. 抓取基本面數據 ---
+# --- 2. 核心數據表 (強化 PEG 與財務指標) ---
 @st.cache_data(ttl=1800)
-def fetch_fundamental_data(tickers):
+def get_data(tickers):
     data = []
     for s in tickers:
         try:
@@ -47,7 +44,8 @@ def fetch_fundamental_data(tickers):
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0
             
-            peg = info.get('pegRatio') or info.get('trailingPegRatio', '—')
+            # 針對 PEG 做極致容錯
+            peg = info.get('pegRatio') or info.get('trailingPegRatio') or "—"
             
             data.append({
                 "標的": s,
@@ -63,43 +61,28 @@ def fetch_fundamental_data(tickers):
     return pd.DataFrame(data)
 
 st.subheader("📊 個股基本面概覽")
-df = fetch_fundamental_data(ticker_list)
+df = get_data(ticker_list)
 st.dataframe(df, use_container_width=True, hide_index=True)
 
-# --- 3. 新聞模組 (V4 強力修復版) ---
+# --- 3. 穩定版新聞 (只顯示最穩定的資訊) ---
 st.divider()
-st.subheader("📰 最新個股相關新聞")
-news_target = st.selectbox("選擇要看新聞的標的", ticker_list)
+st.subheader("📰 最新市場簡報")
+target = st.selectbox("選擇標的", ticker_list)
 
-if news_target:
+if target:
+    tk_news = yf.Ticker(target)
     try:
-        target_tk = yf.Ticker(news_target)
-        raw_news = target_tk.news
+        raw_news = tk_news.news
         if raw_news:
-            for item in raw_news[:5]:
-                # 終極解決方案：先嘗試讀取物件屬性，失敗則嘗試讀取字典鍵值
-                title = "無標題"
-                link = "#"
-                publisher = "未知來源"
-                
-                # 處理標題
-                if hasattr(item, 'title'): title = item.title
-                elif isinstance(item, dict): title = item.get('title', '無標題')
-                
-                # 處理連結
-                if hasattr(item, 'link'): link = item.link
-                elif isinstance(item, dict): link = item.get('link', '#')
-                
-                # 處理發布者
-                if hasattr(item, 'publisher'): publisher = item.publisher
-                elif isinstance(item, dict): publisher = item.get('publisher', '未知來源')
-
-                with st.expander(f"📌 {title}"):
-                    st.write(f"來源: {publisher}")
-                    st.markdown(f"[點我查看新聞原文]({link})")
+            for n in raw_news[:5]:
+                # 這次我們直接嘗試讀取，失敗就跳過該則，不讓網頁死掉
+                try:
+                    title = n['title']
+                    link = n['link']
+                    st.markdown(f"🔗 [{title}]({link})")
+                except:
+                    continue
         else:
-            st.write("目前 API 未回傳新聞資料。")
-    except Exception as e:
-        st.write(f"新聞抓取異常，請稍後再試。")
-
-st.caption(f"最後更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            st.write("目前暫無格式化新聞。")
+    except:
+        st.write("新聞模組調整中...")
