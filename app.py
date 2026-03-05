@@ -8,7 +8,7 @@ st.set_page_config(page_title="我的美股戰情室", layout="wide")
 
 st.title("🚀 我的股市數據儀表板")
 
-# --- 側邊欄：自由輸入標單 ---
+# --- 側邊欄：自由輸入標的 ---
 st.sidebar.header("⚙️ 控制面板")
 default_list = "NVDA, MSFT, META, TSLA, AAPL, ORCL, VOO, QQQM, IBIT, DXYZ, HIMS"
 user_input = st.sidebar.text_area("請輸入美股代號 (用逗號分隔)", default_list)
@@ -47,7 +47,6 @@ def fetch_fundamental_data(tickers):
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0
             
-            # PEG 多重備援
             peg = info.get('pegRatio') or info.get('trailingPegRatio', '—')
             
             data.append({
@@ -67,7 +66,7 @@ st.subheader("📊 個股基本面概覽")
 df = fetch_fundamental_data(ticker_list)
 st.dataframe(df, use_container_width=True, hide_index=True)
 
-# --- 3. 新聞模組 (修復版本) ---
+# --- 3. 新聞模組 (V4 強力修復版) ---
 st.divider()
 st.subheader("📰 最新個股相關新聞")
 news_target = st.selectbox("選擇要看新聞的標的", ticker_list)
@@ -75,17 +74,32 @@ news_target = st.selectbox("選擇要看新聞的標的", ticker_list)
 if news_target:
     try:
         target_tk = yf.Ticker(news_target)
-        # 針對 yfinance 新版 news 格式進行安全抓取
-        for news in target_tk.news[:5]:
-            # 同時嘗試字典與物件兩種讀取方式
-            title = getattr(news, 'title', news.get('title') if isinstance(news, dict) else "無標題")
-            link = getattr(news, 'link', news.get('link') if isinstance(news, dict) else "#")
-            publisher = getattr(news, 'publisher', news.get('publisher') if isinstance(news, dict) else "未知來源")
-            
-            with st.expander(title):
-                st.write(f"來源: {publisher}")
-                st.markdown(f"[點我查看新聞原文]({link})")
-    except Exception as e:
-        st.write("新聞加載中或暫無資料...")
+        raw_news = target_tk.news
+        if raw_news:
+            for item in raw_news[:5]:
+                # 終極解決方案：先嘗試讀取物件屬性，失敗則嘗試讀取字典鍵值
+                title = "無標題"
+                link = "#"
+                publisher = "未知來源"
+                
+                # 處理標題
+                if hasattr(item, 'title'): title = item.title
+                elif isinstance(item, dict): title = item.get('title', '無標題')
+                
+                # 處理連結
+                if hasattr(item, 'link'): link = item.link
+                elif isinstance(item, dict): link = item.get('link', '#')
+                
+                # 處理發布者
+                if hasattr(item, 'publisher'): publisher = item.publisher
+                elif isinstance(item, dict): publisher = item.get('publisher', '未知來源')
 
-st.caption(f"最後更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                with st.expander(f"📌 {title}"):
+                    st.write(f"來源: {publisher}")
+                    st.markdown(f"[點我查看新聞原文]({link})")
+        else:
+            st.write("目前 API 未回傳新聞資料。")
+    except Exception as e:
+        st.write(f"新聞抓取異常，請稍後再試。")
+
+st.caption(f"最後更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
