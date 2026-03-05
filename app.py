@@ -1,12 +1,11 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from datetime import datetime
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="專業股市戰情室 v4.5", layout="wide")
-st.title("🏛️ 專業美股：個股與同業/歷史一體化對照")
+st.set_page_config(page_title="專業股市戰情室 v5.1", layout="wide")
+st.title("🚀 專業美股基本面：長期歷史(3Y)與同業對照")
 
 # --- 側邊欄 ---
 st.sidebar.header("⚙️ 控制面板")
@@ -30,88 +29,81 @@ except: pass
 
 st.divider()
 
-# --- 2. 核心分析邏輯：一體化對照 ---
+# --- 2. 核心分析邏輯：3年歷史與同業對照 ---
 @st.cache_data(ttl=1800)
-def fetch_integrated_data(tickers):
+def fetch_longterm_compare_data(tickers):
     raw_results = []
     industry_pe_map = {}
     
-    # 第一輪：抓取數據並計算行業平均
     for s in tickers:
         try:
             tk = yf.Ticker(s)
             info = tk.info
-            is_etf = info.get('quoteType') in ['ETF', 'FUND']
+            # 將歷史區間拉長至 3 年
+            hist_3y = tk.history(period="3y")
             
-            # 抓取 PEG (多重備援)
-            peg = info.get('pegRatio') or info.get('trailingPegRatio', None)
-            
-            # 垂直比較：計算歷史位階 (過去一年 PE 區間)
+            # 股價與基本面
+            price = hist_3y['Close'].iloc[-1] if not hist_3y.empty else 0
             curr_pe = info.get('trailingPE')
-            pe_rank = "—"
-            if curr_pe and not is_etf:
-                hist_1y = tk.history(period="1y")
-                eps = info.get('trailingEps') or 1
-                pe_high = hist_1y['Close'].max() / eps
-                pe_low = hist_1y['Close'].min() / eps
-                # 計算百分位
-                rank_val = (curr_pe - pe_low) / (pe_high - pe_low) if pe_high != pe_low else 0.5
-                pe_rank = f"{int(rank_val * 100)}%" # 0% 為最便宜，100% 為最貴
-
+            eps = info.get('trailingEps') or 1
+            
+            # 計算 3 年內的 PE 最高與最低點
+            if not hist_3y.empty:
+                pe_3y_high = round(hist_3y['Close'].max() / eps, 1)
+                pe_3y_low = round(hist_3y['Close'].min() / eps, 1)
+            else:
+                pe_3y_high, pe_3y_low = "—", "—"
+            
             industry = info.get('industry', 'ETF/Other')
             
             raw_results.append({
                 "標的": s,
+                "現價": price,
+                "PE (現)": curr_pe,
+                "3年PE高點": pe_3y_high,
+                "3年PE低點": pe_3y_low,
                 "行業": industry,
-                "PE (TTM)": curr_pe,
-                "歷史位階 (0%=最便宜)": pe_rank,
-                "PEG": peg,
+                "PEG": info.get('pegRatio') or info.get('trailingPegRatio'),
                 "ROE (%)": info.get('returnOnEquity'),
-                "毛利率 (%)": info.get('grossMargins')
+                "毛利 (%)": info.get('grossMargins'),
+                "市值 (B)": info.get('marketCap', 0) / 1e9
             })
             
-            # 累計行業 PE 用於水平比較
-            if curr_pe and not is_etf:
+            # 累積同業數據用於水平比較
+            if curr_pe and industry != 'ETF/Other':
                 if industry not in industry_pe_map: industry_pe_map[industry] = []
                 industry_pe_map[industry].append(curr_pe)
         except: continue
     
-    # 計算行業平均 PE
+    # 計算同業平均 PE
     industry_avg = {k: sum(v)/len(v) for k, v in industry_pe_map.items()}
     
-    # 第二輪：格式化最終表格
     final_data = []
     for item in raw_results:
-        ind = item["行業"]
-        avg_pe = industry_avg.get(ind, None)
+        avg_pe = industry_avg.get(item["行業"], 0)
         
-        # 計算與行業平均的偏離度
-        if item["PE (TTM)"] and avg_pe:
-            diff = ((item["PE (TTM)"] / avg_pe) - 1) * 100
-            peer_compare = f"{'+' if diff > 0 else ''}{int(diff)}% (vs同業)"
-        else:
-            peer_compare = "—"
-
         final_data.append({
             "標的": item["標的"],
-            "現價PE": f"{item['PE (TTM)']:.1f}" if item['PE (TTM)'] else "—",
-            "歷史位階": item["歷史位階 (0%=最便宜)"],
-            "水平比較": peer_compare,
+            "現價": f"${item['現價']:.2f}",
+            "PE (現)": f"{item['PE (現)']:.1f}" if item['PE (現)'] else "—",
+            "3年PE區間 (高/低)": f"{item['3年PE高點']} / {item['3年PE低點']}",
+            "同業平均PE": f"{avg_pe:.1f}" if avg_pe > 0 else "—",
             "PEG": round(item["PEG"], 2) if isinstance(item["PEG"], (int, float)) else "—",
             "ROE": f"{round(item['ROE (%)']*100, 1)}%" if item['ROE (%)'] else "—",
-            "毛利": f"{round(item['毛利率 (%)']*100, 1)}%" if item['毛利率 (%)'] else "—",
-            "行業": ind
+            "毛利": f"{round(item['毛利 (%)']*100, 1)}%" if item['毛利 (%)'] else "—",
+            "市值(B)": f"{item['市值 (B)']:.1f}B",
+            "行業": item["行業"]
         })
-    
     return pd.DataFrame(final_data)
 
-st.subheader("📊 專業分析師對照表 (個股 vs 歷史 vs 行業)")
-with st.spinner('正在進行垂直與水平交叉分析...'):
-    df = fetch_integrated_data(ticker_list)
+st.subheader("📊 專業數據表：3年歷史位階與同業水平對照")
+with st.spinner('正在分析長期估值數據...'):
+    df = fetch_longterm_compare_data(ticker_list)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-st.info("💡 **如何閱讀此表？**\n"
-        "- **歷史位階**：靠近 0% 代表目前處於年度低估區；靠近 100% 代表相對歷史較貴。\n"
-        "- **水平比較**：顯示該股比同業平均貴(正數)或便宜(負數)多少。")
+st.markdown("""
+> **📈 垂直分析（歷史）**：觀察『PE (現)』在 3 年高低區間的位置。若接近低點，代表估值處於近年低位。
+> **📉 水平分析（同業）**：對比『同業平均PE』。大幅高於同業可能代表溢價過高，大幅低於則可能具備補漲潛力。
+""")
 
-st.caption(f"最後更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"最後更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
