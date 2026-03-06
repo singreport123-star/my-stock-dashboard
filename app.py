@@ -109,4 +109,69 @@ if target:
     with st.spinner(f'正在執行 {target} 的量價與估值重構...'):
         try:
             target_tk = yf.Ticker(target)
-            target_hist = target_tk.history(period
+            target_hist = target_tk.history(period=history_range)
+            target_hist.index = target_hist.index.tz_localize(None).normalize()
+            
+            target_hist['Turnover'] = (target_hist['Close'] * target_hist['Volume']) / 1e6
+            
+            target_pe, target_eps = get_historical_pe_eps(target, history_range)
+            
+            target_industry = df_snapshot[df_snapshot['標的'] == target]['行業'].iloc[0] if not df_snapshot.empty else "Other"
+            peer_tickers = df_snapshot[df_snapshot['行業'] == target_industry]['標的'].tolist()
+            
+            peer_pe_list = []
+            for peer in peer_tickers:
+                p_pe, _ = get_historical_pe_eps(peer, history_range)
+                if p_pe is not None:
+                    peer_pe_list.append(p_pe.rename(peer))
+            
+            ind_historical_pe = None
+            if peer_pe_list:
+                ind_pe_df = pd.concat(peer_pe_list, axis=1)
+                ind_historical_pe = ind_pe_df.mean(axis=1)
+
+            # --- 💡 繪圖區：版面重新配置 ---
+            fig = make_subplots(
+                rows=3, cols=1, 
+                shared_xaxes=True, 
+                vertical_spacing=0.04, 
+                row_heights=[0.5, 0.2, 0.3], # 上層股價 50%，中層籌碼 20%，下層估值 30%
+                specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]]
+            )
+            
+            # 【Row 1：價與基本面】：股價 vs EPS
+            if show_price:
+                fig.add_trace(go.Scatter(x=target_hist.index, y=target_hist['Close'], name="股價", line=dict(color='black', width=1.5)), row=1, col=1, secondary_y=False)
+            if show_eps and target_eps is not None:
+                fig.add_trace(go.Bar(x=target_eps.index, y=target_eps, name="歷史 EPS", marker_color='rgba(50, 171, 96, 0.3)'), row=1, col=1, secondary_y=True)
+
+            # 💡 【Row 2：籌碼面】：成交金額 (緊貼股價下方)
+            if show_turnover:
+                colors = ['rgba(38, 166, 154, 0.7)' if row['Close'] >= row['Open'] else 'rgba(239, 83, 80, 0.7)' for index, row in target_hist.iterrows()]
+                fig.add_trace(go.Bar(x=target_hist.index, y=target_hist['Turnover'], name="成交金額 (百萬美元)", marker_color=colors), row=2, col=1)
+
+            # 【Row 3：估值面】：PE vs 產業PE
+            if show_pe and target_pe is not None:
+                fig.add_trace(go.Scatter(x=target_pe.index, y=target_pe, name="個股 PE", line=dict(color='orange', width=1), opacity=0.3), row=3, col=1)
+                fig.add_trace(go.Scatter(x=target_pe.index, y=target_pe.rolling(ma_window).mean(), name=f"個股 PE ({ma_window}MA)", line=dict(color='darkorange', width=2.5)), row=3, col=1)
+            if show_ind_pe and ind_historical_pe is not None:
+                fig.add_trace(go.Scatter(x=ind_historical_pe.index, y=ind_historical_pe.rolling(ma_window).mean(), name=f"【{target_industry}】均值", line=dict(color='purple', width=2, dash='dashdot')), row=3, col=1)
+            
+            fwd_pe_val = target_tk.info.get('forwardPE')
+            if show_fwd_pe and fwd_pe_val:
+                fig.add_hline(y=fwd_pe_val, line_dash="dash", line_color="red", annotation_text=f"Fwd PE: {fwd_pe_val:.1f}x", row=3, col=1)
+
+            fig.update_layout(title=f"{target} 專業戰情圖 (價量與估值矩陣)", hovermode="x unified", height=850, barmode='overlay')
+            
+            # Y 軸標籤設定 (對應新的 Row)
+            fig.update_yaxes(title_text="價格 (USD)", row=1, col=1, secondary_y=False)
+            fig.update_yaxes(title_text="EPS (USD)", row=1, col=1, secondary_y=True, showgrid=False)
+            fig.update_yaxes(title_text="金額 (百萬)", row=2, col=1)
+            fig.update_yaxes(title_text="本益比 (倍)", row=3, col=1)
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+        except Exception as e:
+            st.error(f"運算異常：{e}")
+
+st.caption(f"數據最後校準: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
