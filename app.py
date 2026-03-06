@@ -4,23 +4,26 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
-import pytz
 
 # --- 網頁基礎配置 ---
-st.set_page_config(page_title="專業股市戰情室 v11.0", layout="wide")
-st.title("🏛️ 專業美股：長線財務趨勢全方位對照")
+st.set_page_config(page_title="專業股市戰情室 v12.0", layout="wide")
+st.title("🏛️ 專業美股：精準財報對照與估值追蹤")
 
-# --- 側邊欄：進階繪圖控制 ---
-st.sidebar.header("🎨 繪圖指標勾選")
-show_price = st.sidebar.checkbox("股價 (Price)", value=True)
-show_pe = st.sidebar.checkbox("本益比 (PE)", value=True)
-show_eps = st.sidebar.checkbox("每股盈餘 (EPS TTM)", value=True)
-show_roe = st.sidebar.checkbox("ROE (%)", value=True)
-show_gm = st.sidebar.checkbox("毛利率 (Gross Margin %)", value=True)
-show_rev = st.sidebar.checkbox("營收 (Revenue)", value=False)
-show_debt = st.sidebar.checkbox("負債權益比 (D/E)", value=False)
+# --- 側邊欄：控制與勾選 ---
+st.sidebar.header("⚙️ 觀測清單")
+default_list = "NVDA, MSFT, TSLA, AAPL, HIMS, ORCL"
+user_input = st.sidebar.text_area("代號輸入", default_list)
+ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
 
 st.sidebar.divider()
+st.sidebar.header("🎨 繪圖指標勾選")
+st.sidebar.info("💡 財報數據以官方公佈為準，估值數據為每日即時推算。")
+show_price = st.sidebar.checkbox("股價 (Price)", value=True)
+show_pe = st.sidebar.checkbox("本益比 (PE - 每日推算)", value=True)
+show_eps = st.sidebar.checkbox("每股盈餘 (EPS TTM - 財報)", value=True)
+show_roe = st.sidebar.checkbox("ROE (% - 官方數據)", value=True)
+show_gm = st.sidebar.checkbox("毛利率 (Gross Margin % - 財報)", value=True)
+
 history_range = st.sidebar.selectbox("歷史數據跨度", ["3y", "5y", "10y"], index=1)
 ma_window = st.sidebar.slider("趨勢平滑化 (MA天數)", 5, 120, 20)
 
@@ -34,92 +37,118 @@ try:
         c1, c2, c3 = st.columns(3)
         c1.metric("QQQ 現價", f"${curr:.2f}")
         c2.metric("QQQ 200MA", f"${ma200:.2f}")
-        if curr > ma200: st.success("✅ 多頭環境")
-        else: st.error("🚨 空頭環境")
+        if curr > ma200: c3.success("✅ 多頭環境")
+        else: c3.error("🚨 空頭環境")
 except: pass
 
 st.divider()
 
-# --- 2. 動態多指標繪圖邏輯 (解決時區報錯) ---
-st.sidebar.header("⚙️ 觀測清單")
-default_list = "NVDA, MSFT, TSLA, AAPL, HIMS, ORCL"
-user_input = st.sidebar.text_area("代號輸入", default_list)
-ticker_list = [t.strip().upper() for t in user_input.split(",") if t.strip()]
+# --- 2. 核心分析表格 (嚴格分離資料源) ---
+@st.cache_data(ttl=1800)
+def fetch_accurate_data(tickers):
+    results = []
+    for s in tickers:
+        try:
+            tk = yf.Ticker(s)
+            info = tk.info
+            hist_1d = tk.history(period="1d")
+            price = hist_1d['Close'].iloc[-1] if not hist_1d.empty else 0
+            
+            # 即時估值指標 (來自即時推算或官方 info)
+            trailing_pe = info.get('trailingPE')
+            fwd_pe = info.get('forwardPE')
+            peg = info.get('pegRatio') or info.get('trailingPegRatio')
+            
+            # 財報靜態指標 (官方計算好的準確數字)
+            roe = info.get('returnOnEquity')
+            gm = info.get('grossMargins')
+            
+            results.append({
+                "標的": s,
+                "現價": f"${price:.2f}" if price else "—",
+                "PE (即時)": round(trailing_pe, 2) if trailing_pe else "—",
+                "Fwd PE": round(fwd_pe, 2) if fwd_pe else "—",
+                "PEG": round(peg, 2) if isinstance(peg, (int, float)) else "—",
+                "ROE (財報)": f"{round(roe * 100, 2)}%" if roe else "—",
+                "毛利率 (財報)": f"{round(gm * 100, 2)}%" if gm else "—"
+            })
+        except: continue
+    return pd.DataFrame(results)
 
-st.subheader("📈 全方位長線趨勢對照圖")
-target = st.selectbox("選擇分析標的", ticker_list)
+st.subheader("📋 核心基本面快照 (官方數據校準)")
+with st.spinner('獲取最新官方財務數據...'):
+    df_snapshot = fetch_accurate_data(ticker_list)
+    st.dataframe(df_snapshot, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# --- 3. 動態繪圖邏輯 (防呆與極端值過濾) ---
+st.subheader("📈 長線財務與估值趨勢對照")
+target = st.selectbox("選擇深度分析標的", ticker_list)
 
 if target:
-    with st.spinner(f'正在進行深度數據對齊與時區轉換...'):
+    with st.spinner('整合歷史財報與每日股價...'):
         try:
             tk = yf.Ticker(target)
-            # 抓取股價並強制移除時區，避免與財報對齊時報錯
+            # 取得移除時區的每日股價
             hist = tk.history(period=history_range)
             hist.index = hist.index.tz_localize(None)
             
-            # 獲取財報並轉置
+            # 取得財報並移除時區
             q_fin = tk.quarterly_financials.T
-            q_bs = tk.quarterly_balance_sheet.T
-            # 財報日期也強制移除時區
             if not q_fin.empty: q_fin.index = q_fin.index.tz_localize(None)
-            if not q_bs.empty: q_bs.index = q_bs.index.tz_localize(None)
-
-            # --- 數據準備 ---
+            
             df = pd.DataFrame(index=hist.index)
             df['Price'] = hist['Close']
             
-            def safe_align(series):
+            def align_fin(series):
                 if series is not None and not series.empty:
+                    # 使用向前填充將每季公佈的財報數字對齊到每一天的股價上
                     return series.reindex(df.index, method='ffill')
                 return None
 
-            # 指標計算
-            # EPS & PE
-            if 'Basic EPS' in q_fin.columns:
-                df['EPS'] = safe_align(q_fin['Basic EPS'].rolling(4).sum())
-                df['PE'] = df['Price'] / df['EPS']
-            
-            # ROE
-            if 'Net Income' in q_fin.columns and 'Total Stockholders Equity' in q_bs.columns:
-                roe = (q_fin['Net Income'].rolling(4).sum() / q_bs['Total Stockholders Equity'].rolling(4).mean()) * 100
-                df['ROE'] = safe_align(roe)
-            
-            # 毛利
+            # 1. 直接取財報公佈的 EPS 計算真實 PE
+            if 'Diluted EPS' in q_fin.columns or 'Basic EPS' in q_fin.columns:
+                eps_col = 'Diluted EPS' if 'Diluted EPS' in q_fin.columns else 'Basic EPS'
+                eps_ttm = q_fin[eps_col].rolling(4).sum()
+                df['EPS'] = align_fin(eps_ttm)
+                # 過濾極端 PE (排除 EPS 為負或極微小導致 PE 飆破天際的雜訊)
+                raw_pe = df['Price'] / df['EPS']
+                df['PE'] = raw_pe.where((raw_pe > 0) & (raw_pe < 500)) 
+
+            # 2. 直接取財報計算毛利
             if 'Gross Profit' in q_fin.columns and 'Total Revenue' in q_fin.columns:
-                df['GM'] = safe_align((q_fin['Gross Profit'] / q_fin['Total Revenue']) * 100)
-            
-            # 營收與負債
-            if 'Total Revenue' in q_fin.columns: df['Revenue'] = safe_align(q_fin['Total Revenue'])
-            if 'Total Debt' in q_bs.columns and 'Total Stockholders Equity' in q_bs.columns:
-                df['DE'] = safe_align(q_bs['Total Debt'] / q_bs['Total Stockholders Equity'])
+                df['GM'] = align_fin((q_fin['Gross Profit'] / q_fin['Total Revenue']) * 100)
+
+            # 3. ROE 改抓 Yahoo 官方預算好的靜態值畫基準線，或直接從財報取淨利與總資產推算
+            # 這裡為了保證數字合理，我們直接採用該公司當前的官方 ROE 畫一條基準線供參考
+            info = tk.info
+            official_roe = info.get('returnOnEquity', 0) * 100
 
             # --- 繪圖 ---
             fig = make_subplots(specs=[[{"secondary_y": True}]])
             
-            # 左軸：數值較大的指標
+            # 左軸：股價與估值
             if show_price:
                 fig.add_trace(go.Scatter(x=df.index, y=df['Price'], name="股價", line=dict(color='black', width=1.5)), secondary_y=False)
             if show_pe and 'PE' in df.columns:
                 fig.add_trace(go.Scatter(x=df.index, y=df['PE'].rolling(ma_window).mean(), name=f"PE ({ma_window}MA)", line=dict(color='orange', dash='dash')), secondary_y=False)
-            if show_rev and 'Revenue' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['Revenue'], name="營收", line=dict(color='purple', opacity=0.3)), secondary_y=False)
             
-            # 右軸：比例與倍數指標
-            if show_roe and 'ROE' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['ROE'], name="ROE %", line=dict(color='blue')), secondary_y=True)
+            # 右軸：財報比例
+            if show_eps and 'EPS' in df.columns:
+                fig.add_trace(go.Scatter(x=df.index, y=df['EPS'], name="EPS (TTM)", line=dict(color='brown')), secondary_y=True)
             if show_gm and 'GM' in df.columns:
                 fig.add_trace(go.Scatter(x=df.index, y=df['GM'], name="毛利率 %", line=dict(color='green')), secondary_y=True)
-            if show_debt and 'DE' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['DE'], name="負債比 (D/E)", line=dict(color='red', dash='dot')), secondary_y=True)
-            if show_eps and 'EPS' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['EPS'], name="EPS TTM", line=dict(color='brown')), secondary_y=True)
+            if show_roe and official_roe != 0:
+                fig.add_hline(y=official_roe, line_dash="dot", line_color="blue", annotation_text=f"官方當前 ROE: {official_roe:.1f}%", secondary_y=True)
 
-            fig.update_layout(title=f"{target} {history_range} 財務與估值趨勢全觀", hovermode="x unified", height=700)
-            fig.update_yaxes(title_text="價格 / PE", secondary_y=False)
-            fig.update_yaxes(title_text="百分比 / 倍數 / EPS", secondary_y=True)
+            fig.update_layout(title=f"{target} {history_range} 真實數據對照", hovermode="x unified", height=600)
+            fig.update_yaxes(title_text="價格 (USD) / 本益比 (倍)", secondary_y=False)
+            fig.update_yaxes(title_text="毛利率 (%) / EPS (USD)", secondary_y=True)
+            
             st.plotly_chart(fig, use_container_width=True)
             
         except Exception as e:
-            st.error(f"數據對齊異常：{e}。這通常是因為該標的在所選區間內財報欄位不完整。")
+            st.error(f"分析繪圖異常：請確認該標的具有完整的財報歷史紀錄。")
 
-st.caption(f"數據最後更新 (Taipei): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"數據最後校準: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
